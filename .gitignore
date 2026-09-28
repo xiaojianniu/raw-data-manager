@@ -1,0 +1,22 @@
+node_modules/
+dist/
+dist-electron/
+release/
+.test-output/
+.qa/
+*.log
+
+# Local acceptance evidence: machine paths and an actual WB image
+scripts/prepare-qa.ts
+scripts/electron-smoke.mjs
+scripts/first-run-smoke.mjs
+scripts/qa-browser.ts
+docs/desktop-smoke.json
+docs/first-run-smoke.json
+docs/packaged-smoke.json
+docs/installation-verification.json
+docs/source-integrity.json
+docs/test-results.txt
+docs/desktop-verified.png
+docs/packaged-desktop.png
+docs/验收记录.md

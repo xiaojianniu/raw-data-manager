@@ -1,0 +1,41 @@
+import { useState, type ClipboardEvent } from 'react';
+import { Plus, Trash2, Copy } from 'lucide-react';
+import type { Animal, ArchiveApi, ExperimentDraft, ExperimentType, RecordRow, RecordStatus } from '../shared/types';
+import { FIELD_SETS, ROW_SETS, TYPES, STATUSES, errorText } from './model';
+import { Field, ErrorBanner, Busy } from './components';
+
+export function DraftEditor({ draft, change, api, compact = false, section = 'all', animals, refreshAnimals, confirm }: { draft: ExperimentDraft; change: (draft: ExperimentDraft) => void; api: ArchiveApi; compact?: boolean; section?: 'all' | 'basic' | 'rows'; animals: Animal[]; refreshAnimals: () => Promise<void>; confirm: (text: string) => Promise<boolean> }) {
+  const [templateBusy, setTemplateBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [animalLabel, setAnimalLabel] = useState('');
+  const [animalNotes, setAnimalNotes] = useState('');
+  const [animalBusy, setAnimalBusy] = useState(false);
+  const [tagText, setTagText] = useState(draft.tags.join(', '));
+  const patch = (key: keyof ExperimentDraft, value: unknown) => change({ ...draft, [key]: value });
+  const typeChange = async (type: ExperimentType) => { if ((Object.keys(draft.fields).length || draft.rows.length) && !await confirm('切换实验类型会清空当前结构化字段和样本行。基本信息将保留，是否继续？')) return; change({ ...draft, type, fields: {}, rows: [] }); };
+  const template = async () => { setTemplateBusy(true); setError(''); try { const last = await api.lastTemplate(draft.type); if (!last) { setError('该类型暂无可复用模板。保存过实验后可复用其参数。'); return; } const fields: Record<string, string> = {}; FIELD_SETS[draft.type].forEach(([key]) => { if (last.fields[key]) fields[key] = last.fields[key]; }); change({ ...draft, fields }); } catch (e) { setError(errorText(e)); } finally { setTemplateBusy(false); } };
+  const addRow = () => patch('rows', [...draft.rows, { id: crypto.randomUUID(), sampleId: '', data: {} }]);
+  const rowChange = (index: number, key: string, value: string) => { const rows = draft.rows.map((row, i) => i === index ? key === 'sampleId' ? { ...row, sampleId: value } : key === 'animalId' ? { ...row, animalId: value || undefined } : { ...row, data: { ...row.data, [key]: value } } : row); patch('rows', rows); };
+  const paste = (event: ClipboardEvent<HTMLInputElement | HTMLSelectElement>, rowIndex: number, colIndex: number) => {
+    const value = event.clipboardData.getData('text/plain'); if (!/[\t\n]/.test(value)) return; event.preventDefault();
+    const lines = value.replace(/\r/g, '').replace(/\n$/, '').split('\n').map(line => line.split('\t')); const columns = ROW_SETS[draft.type];
+    const rows: RecordRow[] = draft.rows.map(row => ({ ...row, data: { ...row.data } }));
+    let rejectedAnimals = false;
+    let rejectedReviews = false;
+    lines.forEach((cells, offset) => { const index = rowIndex + offset; if (!rows[index]) rows[index] = { id: crypto.randomUUID(), sampleId: '', data: {} }; cells.forEach((cell, columnOffset) => { const column = columns[colIndex + columnOffset]; if (!column) return; const key = column[0]; if (key === 'sampleId') rows[index].sampleId = cell; else if (key === 'animalId') { const animal = animals.find(a => a.id === cell || `${a.label} · ${a.id.slice(-6)}` === cell); rows[index].animalId = animal?.id; if (cell && !animal) rejectedAnimals = true; } else if (key === 'reviewState') { rows[index].data[key] = ['', '未复核', '待复核', '已复核'].includes(cell) ? cell : ''; if (cell && !rows[index].data[key]) rejectedReviews = true; } else rows[index].data[key] = cell; }); });
+    patch('rows', rows); if (rejectedAnimals || rejectedReviews) setError([rejectedAnimals ? '粘贴的动物标识未匹配内部 ID；请在对应行选择动物。鼠号相同也可能属于不同动物，系统不会自动合并。' : '', rejectedReviews ? '复核状态仅接受“未复核”“待复核”“已复核”；未匹配值已留空，请手动确认。' : ''].filter(Boolean).join(' '));
+  };
+  const createAnimal = async () => { if (!animalLabel.trim()) return; setAnimalBusy(true); try { await api.createAnimal(animalLabel.trim(), animalNotes); await refreshAnimals(); setAnimalLabel(''); setAnimalNotes(''); } catch (e) { setError(errorText(e)); } finally { setAnimalBusy(false); } };
+  return <div className="draft-editor">{error && <ErrorBanner message={error} dismiss={() => setError('')} />}{section !== 'rows' && <><div className="form-grid">
+    <Field label="实验名称 *" wide><input value={draft.title} onChange={e => patch('title', e.target.value)} placeholder="输入实验名称" /></Field>
+    <Field label="实验类型"><select value={draft.type} onChange={e => void typeChange(e.target.value as ExperimentType)}>{TYPES.map(type => <option key={type}>{type}</option>)}</select></Field>
+    <Field label="实验日期（未知可留空）"><input type="date" value={draft.date} onChange={e => patch('date', e.target.value)} /></Field>
+    <Field label="课题"><input value={draft.project} onChange={e => patch('project', e.target.value)} /></Field>
+    <Field label="整理状态"><select value={draft.status} onChange={e => patch('status', e.target.value as RecordStatus)}>{STATUSES.map(status => <option key={status}>{status}</option>)}</select></Field>
+    <Field label="标签（逗号分隔）" wide><input value={tagText} onChange={e => { setTagText(e.target.value); patch('tags', [...new Set(e.target.value.split(/[,，]/).map(tag => tag.trim()).filter(Boolean))]); }} /></Field>
+    <Field label="实验记录与备注" wide><textarea rows={compact ? 2 : 4} value={draft.notes} onChange={e => patch('notes', e.target.value)} placeholder="记录实际条件、来源与待确认事项" /></Field>
+  </div><div className="section-heading"><h3>{draft.type} 参数</h3><button disabled={templateBusy} onClick={() => void template()}>{templateBusy ? <Busy>载入中</Busy> : <><Copy size={14} />复用最近参数</>}</button></div><p className="hint">只复用本类型的实验参数，不带入样本、鼠号、判读结果。未知字段请留空。</p><div className="form-grid">{FIELD_SETS[draft.type].map(([key, label]) => <Field key={key} label={label}><input value={draft.fields[key] || ''} onChange={e => patch('fields', { ...draft.fields, [key]: e.target.value })} /></Field>)}</div></>}
+  {!compact && section !== 'basic' && <><div className="section-heading"><h3>{draft.type === '鼠尾鉴定' ? '动物、样本与人工判读' : '样本与记录行'}</h3><button onClick={addRow}><Plus size={14} />添加行</button></div><p className="hint">可从 Excel 复制多个单元格，再粘贴到对应起始单元格；列顺序以表头为准。每行保留独立 ID。</p>{draft.type === '鼠尾鉴定' && <div className="animal-create"><input aria-label="新动物鼠号" placeholder="新动物鼠号（可重复）" value={animalLabel} onChange={e => setAnimalLabel(e.target.value)} /><input aria-label="新动物备注" placeholder="动物备注" value={animalNotes} onChange={e => setAnimalNotes(e.target.value)} /><button disabled={animalBusy || !animalLabel.trim()} onClick={() => void createAnimal()}>{animalBusy ? '创建中…' : '创建动物'}</button><small>选择项显示鼠号与内部 ID 后六位。</small></div>}
+  <div className="table-scroll row-table"><table><thead><tr><th>#</th>{ROW_SETS[draft.type].map(([key, label]) => <th key={key}>{label}</th>)}<th>操作</th></tr></thead><tbody>{draft.rows.map((row, index) => <tr key={row.id}><td>{index + 1}</td>{ROW_SETS[draft.type].map(([key, label], columnIndex) => <td key={key}>{key === 'animalId' ? <select aria-label={`第 ${index + 1} 行 ${label}`} value={row.animalId || ''} onChange={e => rowChange(index, key, e.target.value)} onPaste={e => paste(e, index, columnIndex)}><option value="">未选择</option>{animals.map(animal => <option key={animal.id} value={animal.id}>{animal.label} · {animal.id.slice(-6)}</option>)}</select> : key === 'reviewState' ? <select aria-label={`第 ${index + 1} 行 ${label}`} value={row.data[key] || ''} onChange={e => rowChange(index, key, e.target.value)} onPaste={e => paste(e, index, columnIndex)}><option value="">未知</option><option>未复核</option><option>待复核</option><option>已复核</option></select> : <input aria-label={`第 ${index + 1} 行 ${label}`} type={key === 'sampledDate' ? 'date' : 'text'} value={key === 'sampleId' ? row.sampleId : row.data[key] || ''} onChange={e => rowChange(index, key, e.target.value)} onPaste={e => paste(e, index, columnIndex)} />}</td>)}<td><button className="icon-button" aria-label={`删除第 ${index + 1} 行`} onClick={() => patch('rows', draft.rows.filter((_, i) => i !== index))}><Trash2 size={15} /></button></td></tr>)}</tbody></table>{draft.rows.length === 0 && <div className="table-empty">暂无样本记录。添加一行开始填写。</div>}</div>{draft.type === '鼠尾鉴定' && <p className="hint">人工判读与复核状态分别保存；软件不根据条带自动推断基因型。</p>}</>}
+  </div>;
+}
